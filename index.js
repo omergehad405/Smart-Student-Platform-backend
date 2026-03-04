@@ -15,9 +15,10 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// Express.js style - top-level setup and routes
-
 // Middleware
+app.use(express.json({ limit: '50mb', extended: true }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
 app.use(cors());
 app.use(express.json());
 
@@ -26,9 +27,9 @@ const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL ||
 const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNtYXh1dHFtYmx2dmdoZnRvdXF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU1NTkyNDksImV4cCI6MjA4MTEzNTI0OX0.a8VbYwNY6mYkCBMiSSwUVU-zThSQnvIBEeH4GT_i-Xk";
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-console.log("✅ تمإعداد Supabase بنجاح");
+console.log("✅ تم إعداد Supabase بنجاح");
 
-// Helper functions
+// ✅ UPDATED: Helper functions
 const getGroqInstance = () => {
   let key = process.env.GROQ_API_KEY || process.env.VITE_GROQ_API_KEY;
   if (key) key = key.trim().replace(/^["']|["']$/g, '');
@@ -41,10 +42,10 @@ const getGroqInstance = () => {
 };
 
 const getGeminiInstance = () => {
-  let key = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.API_KEY || process.env.GROQ_API_KEY;
+  let key = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.API_KEY;
   if (key) key = key.trim().replace(/^["']|["']$/g, '');
   if (!key || key === 'undefined' || key === 'null' || key.length < 10) {
-    console.error("❌ لا يوجد مفتاح Gemini API صالح");
+    console.error("❌ لا يوجد مفتاح GEMINI_API_KEY صالح");
     return null;
   }
   console.log(`🔍 فحص مفتاح Gemini: البداية=${key.substring(0, 7)}, النهاية=${key.substring(key.length - 4)}, الطول=${key.length}`);
@@ -68,6 +69,154 @@ const callWithRetry = async (fn, retries = 3, delay = 2000) => {
   }
 };
 
+// ✅ NEW: Supported Gemini models (YOUR exact models)
+const VALID_GEMINI_MODELS = [
+  'gemini-3-flash-preview',           // ✅ ADD
+  'gemini-2.5-flash-preview-tts',     // ✅ ADD  
+  'gemini-2.5-flash-native-audio-preview-12-2025', // ✅ ADD
+  'gemini-2.5-flash-preview',         // ✅ ADD
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+  'gemini-pro'
+];
+
+
+// ✅ NEW: Groq handler
+const handleGroqRequest = async (req, res) => {
+  const groq = getGroqInstance();
+  if (!groq) {
+    return res.status(400).json({
+      error: "GROQ_API_KEY مفقود من .env (console.groq.com)",
+      code: 400
+    });
+  }
+
+  let messages = [];
+  if (Array.isArray(req.body.contents)) {
+    messages = req.body.contents;
+  } else if (req.body.contents && typeof req.body.contents === 'object') {
+    messages = [req.body.contents];
+  } else if (typeof req.body.contents === 'string') {
+    messages = [{ role: 'user', content: req.body.contents }];
+  } else {
+    messages = [{ role: 'user', content: 'Hello' }];
+  }
+
+  const validMessages = messages
+    .slice(-10)
+    .map(msg => ({
+      role: msg.role || 'user',
+      content: msg.content || String(msg)
+    }))
+    .filter(msg => msg.content && msg.content.trim());
+
+  const groqModel = ['llama-3.1-8b-instant', 'llama-3.1-70b-versatile', 'mixtral-8x7b-32768'].includes(req.body.model)
+    ? req.body.model
+    : 'llama-3.1-8b-instant';
+
+  try {
+    console.log('🚀 GROQ:', groqModel);
+    const completion = await groq.chat.completions.create({
+      model: groqModel,
+      messages: validMessages,
+      max_tokens: 2048,
+      temperature: 0.7
+    });
+
+    return res.json({
+      choices: [{
+        message: {
+          content: completion.choices[0].message.content,
+          role: 'assistant'
+        }
+      }],
+      model: completion.model,
+      usage: completion.usage
+    });
+  } catch (error) {
+    console.error('❌ Groq Error:', error.message);
+    return res.status(500).json({
+      error: `Groq Error: ${error.message}`,
+      provider: 'groq',
+      code: 500
+    });
+  }
+};
+
+// ✅ NEW: Gemini handler (SUPPORTS YOUR MODELS)
+const handleGeminiRequest = async (req, res) => {
+  const ai = getGeminiInstance();
+  if (!ai) {
+    return res.status(500).json({
+      error: "GEMINI_API_KEY مفقود من .env (ai.google.dev)",
+      code: 500
+    });
+  }
+
+  try {
+    const { model = 'gemini-1.5-flash', contents, config = {} } = req.body;
+
+    const safeModel = VALID_GEMINI_MODELS.includes(model) ? model : 'gemini-1.5-flash';
+    console.log('🤖 GEMINI:', safeModel, 'TTS?', model.includes('tts'));
+
+    const geminiModel = ai.getGenerativeModel({
+      model: safeModel,
+      generationConfig: {
+        ...config,
+        maxOutputTokens: 2048,
+        temperature: config.temperature || 0.7
+      }
+    });
+
+    let response;
+    let messages = Array.isArray(contents) ? contents : [contents];
+
+    // ✅ Special TTS handling
+    if (model === 'gemini-2.5-flash-preview-tts') {
+      response = await geminiModel.generateContent(messages);
+      return res.json({
+        text: response.response.text(),
+        audio: true,
+        model: safeModel,
+        isTTS: true,
+        candidates: response.response.candidates
+      });
+    }
+
+    // Regular generation
+    response = await callWithRetry(() => geminiModel.generateContent(messages));
+
+    const text = response.response.text() || "";
+
+    return res.json({
+      text,
+      model: safeModel,
+      candidates: response.response.candidates,
+      isTTS: model.includes('tts')
+    });
+
+  } catch (error) {
+    console.error("❌ Gemini Error Details:", {
+      message: error.message,
+      code: error.code,
+      status: error.status,
+      model: req.body.model
+    });
+
+    // ✅ Clear error messages
+    const errorMsg = error.message || 'Unknown Gemini error';
+
+    return res.status(500).json({
+      error: errorMsg,
+      provider: 'gemini',
+      model: req.body.model || 'unknown',
+      code: 500,
+      text: ''  // ✅ Prevent frontend JSON.parse(undefined)
+    });
+  }
+
+};
+
 // API routes
 
 app.get('/api/health', (req, res) => {
@@ -78,24 +227,27 @@ app.get('/api/health', (req, res) => {
 
   res.json({
     status: "ok",
-    message: "Server is running",
+    message: "Server is running ✅ Multi-provider AI ready",
     env: {
       hasGroqKey: !!cleanedGroqKey,
-      groqKeyDetails: cleanedGroqKey
-        ? {
-          length: cleanedGroqKey.length,
-          prefix: cleanedGroqKey.substring(0, 7),
-          suffix: cleanedGroqKey.substring(cleanedGroqKey.length - 4),
-        }
-        : "none",
+      groqKeyDetails: cleanedGroqKey ? {
+        length: cleanedGroqKey.length,
+        prefix: cleanedGroqKey.substring(0, 7),
+        suffix: cleanedGroqKey.substring(cleanedGroqKey.length - 4),
+      } : "none",
       hasGeminiKey: !!cleanedGeminiKey,
+      validGeminiModels: VALID_GEMINI_MODELS,
       hasSupabase: !!supabaseUrl,
       nodeEnv: process.env.NODE_ENV,
     },
   });
 });
 
+// ✅ UPDATED: Test all models
 app.get('/api/test-ai', async (req, res) => {
+  const tests = [];
+
+  // Test Groq
   const groq = getGroqInstance();
   if (groq) {
     try {
@@ -104,173 +256,74 @@ app.get('/api/test-ai', async (req, res) => {
         messages: [{ role: 'user', content: 'Say hello' }],
         max_tokens: 50,
       });
-      return res.json({
-        groq: completion.choices[0].message.content,
-        status: 'Groq OK'
-      });
+      tests.push({ groq: completion.choices[0].message.content, status: 'OK' });
     } catch (error) {
-      console.error('Groq test failed:', error.message);
+      tests.push({ groq: `Error: ${error.message}`, status: 'FAILED' });
     }
   }
 
+  // Test YOUR Gemini models
   const gemini = getGeminiInstance();
-  if (!gemini) return res.status(500).json({ error: "No AI key" });
-
-  try {
-    const model = gemini.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    const response = await model.generateContent("Say hello");
-    res.json({
-      gemini: response.response.text(),
-      status: 'Gemini OK'
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+  if (gemini) {
+    for (const testModel of ['gemini-3-flash-preview', 'gemini-2.5-flash-preview-tts']) {
+      try {
+        const model = gemini.getGenerativeModel({ model: testModel });
+        const response = await model.generateContent("Say hello");
+        tests.push({
+          [`gemini-${testModel.replace(/[-.]/g, '_')}`]: response.response.text(),
+          status: 'OK'
+        });
+      } catch (error) {
+        tests.push({
+          [`gemini-${testModel.replace(/[-.]/g, '_')}`]: `Error: ${error.message.slice(0, 100)}`,
+          status: 'FAILED'
+        });
+      }
+    }
   }
+
+  res.json({ tests, status: 'All tests completed' });
 });
 
+// ✅ MAIN UPDATED /api/ai endpoint
 app.post('/api/ai', async (req, res) => {
-  console.log('📡 AI Request received:', {
+  console.log('📡 AI Request:', {
     provider: req.body.provider,
     model: req.body.model,
     forceGroq: req.body.forceGroq,
-    contentsType: typeof req.body.contents,
-    contentsLength: req.body.contents?.length
+    forceProvider: req.body.forceProvider
   });
 
-  // Groq path
-  if (req.body.provider === 'groq' || req.body.forceGroq) {
-    const groq = getGroqInstance();
-    if (!groq) {
-      return res.status(400).json({
-        error: "GROQ_API_KEY مفقود من ملف .env. أضف مفتاحك من console.groq.com"
-      });
-    }
+  const { provider = 'auto', model = 'llama-3.1-8b-instant', contents, config } = req.body;
 
-    // Normalise messages
-    let messages = [];
-    if (Array.isArray(req.body.contents)) {
-      messages = req.body.contents;
-    } else if (req.body.contents && typeof req.body.contents === 'object') {
-      messages = [req.body.contents];
-    } else if (typeof req.body.contents === 'string') {
-      messages = [{ role: 'user', content: req.body.contents }];
-    } else {
-      messages = [{ role: 'user', content: 'Hello' }];
-    }
-
-    const validMessages = messages
-      .slice(-10)
-      .map(msg => ({
-        role: msg.role || 'user',
-        content: msg.content || String(msg)
-      }))
-      .filter(msg => msg.content && msg.content.trim());
-
-    console.log(`✅ Fixed ${validMessages.length} messages for Groq`);
-
-    const model = ['llama-3.1-8b-instant', 'llama-3.1-70b-versatile'].includes(req.body.model || '')
-      ? req.body.model
-      : 'llama-3.1-8b-instant';
-
-    try {
-      console.log('🚀 Using GROQ:', model);
-      const completion = await groq.chat.completions.create({
-        model,
-        messages: validMessages,
-        max_tokens: 2048,
-        temperature: 0.7
-      });
-
-      console.log('✅ GROQ SUCCESS!');
-      return res.json({
-        choices: [{
-          message: {
-            content: completion.choices[0].message.content,
-            role: 'assistant'
-          }
-        }],
-        model: completion.model,
-        usage: completion.usage
-      });
-    } catch (error) {
-      console.error('❌ Groq Error:', error.message);
-      return res.status(500).json({
-        error: `Groq Error: ${error.message}`,
-        provider: 'groq',
-        debug: { receivedType: typeof req.body.contents }
-      });
-    }
+  // ✅ Smart routing logic
+  if (provider === 'groq' || req.body.forceGroq) {
+    return handleGroqRequest(req, res);
   }
 
-  // Gemini fallback
-  console.log('🤖 Using Gemini (fallback)');
-  const ai = getGeminiInstance();
-  if (!ai) {
-    return res.status(500).json({ error: "Gemini API Key is missing on server" });
+  if (provider === 'gemini' || req.body.forceProvider) {
+    return handleGeminiRequest(req, res);
   }
-  try {
-    const { model, contents, config } = req.body;
-    const response = await callWithRetry(() => {
-      const geminiModel = ai.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
-      return geminiModel.generateContent(contents, config);
-    });
 
-    let text = "";
-    try {
-      text = response.response.text() || "";
-    } catch (e) {
-      console.warn("Could not read response text in /api/ai:", e);
-    }
-
-    const result = {
-      text: text,
-      candidates: response.response.candidates
-    };
-    res.json(result);
-  } catch (error) {
-    console.error("Gemini Generic Error:", error);
-    res.status(500).json({ error: error.message || "AI request failed" });
+  // Auto-detect by model
+  if (VALID_GEMINI_MODELS.includes(model)) {
+    console.log('🔍 Auto Gemini:', model);
+    return handleGeminiRequest(req, res);
   }
+
+  // Default Groq
+  console.log('🔍 Default Groq');
+  return handleGroqRequest(req, res);
 });
 
 app.post('/api/chat', async (req, res) => {
   console.log('📡 Chat Request:', req.body.provider);
 
   if (req.body.provider === 'groq') {
-    const groq = getGroqInstance();
-    if (groq) {
-      try {
-        let messages = [];
-        if (Array.isArray(req.body.message)) {
-          messages = req.body.message;
-        } else if (req.body.message && typeof req.body.message === 'object') {
-          messages = [req.body.message];
-        } else if (typeof req.body.message === 'string') {
-          messages = [{ role: 'user', content: req.body.message }];
-        }
-
-        const validMessages = messages.map(msg => ({
-          role: msg.role || 'user',
-          content: msg.content || String(msg)
-        })).filter(msg => msg.content);
-
-        console.log('🚀 Chat using GROQ');
-        const completion = await groq.chat.completions.create({
-          model: req.body.model || 'llama-3.1-8b-instant',
-          messages: validMessages,
-          max_tokens: 2048,
-          temperature: 0.7
-        });
-        return res.json({
-          text: completion.choices[0].message.content
-        });
-      } catch (error) {
-        console.error('❌ Groq Chat Error:', error.message);
-      }
-    }
+    return handleGroqRequest(req, res);
   }
 
-  // Gemini fallback
+  // Gemini chat
   const ai = getGeminiInstance();
   if (!ai) {
     return res.status(500).json({
@@ -280,37 +333,29 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     const { message, context, model = 'gemini-1.5-flash' } = req.body;
-    const response = await callWithRetry(() => {
-      const geminiModel = ai.getGenerativeModel({ model });
-      return geminiModel.generateContent({
-        contents: message,
-        generationConfig: {
-          systemInstruction: "أنت مساعد ذكي لمنصة الطالب الذكي. السياق المتاح: " + (context || "عام")
-        }
-      });
+    const safeModel = VALID_GEMINI_MODELS.includes(model) ? model : 'gemini-1.5-flash';
+
+    const geminiModel = ai.getGenerativeModel({
+      model: safeModel,
+      generationConfig: {
+        systemInstruction: "أنت مساعد ذكي لمنصة الطالب الذكي. السياق: " + (context || "عام")
+      }
     });
 
-    let text = "";
-    try {
-      text = response.response.text() || "";
-    } catch (e) {
-      console.warn("Could not read response text:", e);
-      const finishReason = response.response.candidates?.[0]?.finishReason;
-      if (finishReason === 'SAFETY') {
-        text = "عذراً، لا يمكنني الإجابة على هذا السؤال لأسباب تتعلق بسياسات السلامة.";
-      } else {
-        text = "عذراً، حدث خطأ أثناء معالجة الرد.";
-      }
-    }
+    const response = await callWithRetry(() =>
+      geminiModel.generateContent(Array.isArray(message) ? message : [message])
+    );
+
+    let text = response.response.text() || "عذراً، حدث خطأ.";
 
     res.json({ text });
   } catch (error) {
-    console.error("Gemini Server Error:", error);
+    console.error("Gemini Chat Error:", error);
     res.status(500).json({ error: "فشل AI: " + (error.message || "Unknown error") });
   }
 });
 
-// Data endpoints
+// Data endpoints (unchanged)
 app.get('/api/data', async (req, res) => {
   try {
     const { data: profiles } = await supabase.from('profiles').select('*');
@@ -364,7 +409,7 @@ app.get('/api/quizzes/:id', async (req, res) => {
   res.json(data);
 });
 
-// Video endpoints
+// Video endpoints (unchanged)
 app.post('/api/ai/videos', async (req, res) => {
   const ai = getGeminiInstance();
   if (!ai) return res.status(500).json({ error: "Gemini API Key is missing" });
@@ -420,6 +465,7 @@ app.post('/api/ai/videos/operation', async (req, res) => {
       console.log(`🚀 خادم المنصة يعمل على المنفذ ${PORT}`);
       console.log(`✅ Groq Ready: ${!!(process.env.GROQ_API_KEY || process.env.VITE_GROQ_API_KEY)}`);
       console.log(`✅ Gemini Ready: ${!!(process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY)}`);
+      console.log(`✅ Gemini Models: ${VALID_GEMINI_MODELS.join(', ')}`);
     });
   }
 })();
