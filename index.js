@@ -83,10 +83,10 @@ app.get('/api/health', (req, res) => {
       hasGroqKey: !!cleanedGroqKey,
       groqKeyDetails: cleanedGroqKey
         ? {
-            length: cleanedGroqKey.length,
-            prefix: cleanedGroqKey.substring(0, 7),
-            suffix: cleanedGroqKey.substring(cleanedGroqKey.length - 4),
-          }
+          length: cleanedGroqKey.length,
+          prefix: cleanedGroqKey.substring(0, 7),
+          suffix: cleanedGroqKey.substring(cleanedGroqKey.length - 4),
+        }
         : "none",
       hasGeminiKey: !!cleanedGeminiKey,
       hasSupabase: !!supabaseUrl,
@@ -409,7 +409,7 @@ app.post('/api/ai/videos/operation', async (req, res) => {
     app.use(vite.middlewares);
   } else if (!process.env.VERCEL) {
     app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('/:path(*)', (req, res) => {
+    app.get(/(.*)/, (req, res) => {
       res.sendFile(path.join(__dirname, 'dist', 'index.html'));
     });
   }
